@@ -1,0 +1,21 @@
+#!/bin/sh
+# Agent todo list, kept on the herdr terminal as label herdr.todos (JSON: [{t, s}]).
+set -e
+T=${HC_TERMINAL_ID:?not in a herdr terminal}
+get() { hc get "$T" --json | jq -c '.labels["herdr.todos"] // "[]" | fromjson? // []'; }
+put() { hc label "$T" "herdr.todos=$1" >/dev/null; }
+mark() { cur=$(get); for n in "$@"; do cur=$(printf %s "$cur" | jq -c --argjson i "$n" --arg s "$S" '.[$i-1].s = $s'); done; put "$cur"; }
+cmd=${1:-ls}; [ $# -gt 0 ] && shift
+case "$cmd" in
+  add) cur=$(get); for t in "$@"; do cur=$(printf %s "$cur" | jq -c --arg t "$t" '. + [{t: $t, s: "todo"}]'); done; put "$cur" ;;
+  set) put "$(jq -Rnc '[inputs | select(length > 0) | {t: ., s: "todo"}]')" ;;
+  start) cur=$(get | jq -c 'map(if .s == "doing" then .s = "todo" else . end)'); put "$cur"; S=doing mark "$@" ;;
+  done) S=done mark "$@" ;;
+  undo) S=todo mark "$@" ;;
+  edit) put "$(get | jq -c --argjson i "$1" --arg t "$2" '.[$i-1].t = $t')" ;;
+  rm) cur=$(get); for n in $(printf '%s\n' "$@" | sort -rn); do cur=$(printf %s "$cur" | jq -c --argjson i "$n" 'del(.[$i-1])'); done; put "$cur" ;;
+  clear) put "[]" ;;
+  ls) ;;
+  *) echo "usage: todo add <text>... | set (lines on stdin) | start <n> | done <n>... | undo <n>... | edit <n> <text> | rm <n>... | clear | ls" >&2; exit 2 ;;
+esac
+get | jq -r 'to_entries[] | "\(.key + 1). [\({todo: " ", doing: ">", done: "x"}[.value.s])] \(.value.t)"'
