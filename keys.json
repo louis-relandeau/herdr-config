@@ -69,7 +69,11 @@
       }
     },
     "ctrl-shift-y": "layout.toggle:agent-todos",
-    "ctrl-b": "layout.toggle:sidebar"
+    "ctrl-b": "layout.toggle:sidebar",
+    "ctrl-shift-h": "mod.open:nav-keys",
+    "shift-pagedown": "space-tree.pane-next",
+    "shift-pageup": "space-tree.pane-prev",
+    "ctrl-shift-d": "space-tree.agent-done"
   },
   "terminal": {
     "ctrl-backspace": "send:\u0017",

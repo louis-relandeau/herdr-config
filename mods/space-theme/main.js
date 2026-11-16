@@ -14,7 +14,7 @@ export default class SpaceTheme extends View {
     const space = spaces().find((s) => s.id === id);
     const name = OVERRIDES[space?.name] ?? BY_COLOR[(shared("space.colors") ?? {})[id]] ?? "void";
     const tree = layout();
-    const image = `backgrounds/galaxy-soft-${name}.png`;
+    const image = `backgrounds/bh2-${name}.png`;
     // Only on a space switch: a layout edit in flight would otherwise be overwritten with a stale tree.
     if (id === this.space) return div();
     this.space = id;

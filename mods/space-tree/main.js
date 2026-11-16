@@ -1,8 +1,8 @@
 // Spaces with their agents nested underneath (and sub-agents under those): one sidebar list.
 
 import { View, div, image, svg } from "gpui-kit";
-import { v_flex, h_flex } from "gpui-base";
-import { agents, terminals, spaces, panes, run, theme, shared, setShared, setAgentOrder, openOverlay, layout, updates } from "herdr";
+import { v_flex, h_flex, ScrollHandle } from "gpui-base";
+import { agents, terminals, spaces, panes, run, theme, shared, setShared, setAgentOrder, openOverlay, layout, updates, nextCommand, focused } from "herdr";
 
 function find(node, id) {
   if (node?.id === id) return node;
@@ -32,8 +32,86 @@ function icon(p, size, color) {
 }
 
 export default class SpaceTree extends View {
-  init(_props, _cx) {
+  init(_props, cx) {
     this.folded = new Set(JSON.parse(localStorage.getItem("folded") ?? "[]"));
+    this.handle = cx.focus_handle();
+    this.scroll = ScrollHandle.new();
+    this.nav = [];
+    this.cur = null;
+    cx.spawn(async (cx) => {
+      for (;;) {
+        const c = await nextCommand();
+        if (c === "pane-next" || c === "pane-prev") { this.cyclePane(c === "pane-next" ? 1 : -1); continue; }
+        if (c === "agent-done") { this.nextDone(); continue; }
+        if (c !== "focus") continue;
+        const f = focused();
+        const here = [`pn-${f?.pane}`, `space-${f?.space}`].find((id) => this.nav.some((n) => n.id === id));
+        if (!this.nav.some((n) => n.id === this.cur)) this.cur = here ?? this.nav[0]?.id ?? null;
+        else if (here) this.cur = here;
+        this.handle.focus();
+        this.reveal();
+        cx.notify();
+      }
+    });
+  }
+
+  // The next "done" or "blocked" (needs you) agent after the focused one, in the tree's order, wrapping around.
+  nextDone() {
+    const all = agents();
+    const by = new Map(all.map((a) => [a.address, a]));
+    const list = (this.agentOrder ?? all.map((a) => a.address)).map((x) => by.get(x)).filter(Boolean);
+    const i = list.findIndex((a) => a.focused);
+    const rest = [...list.slice(i + 1), ...list.slice(0, i + 1)];
+    const a = rest.find((a) => a.status === "done" || a.status === "blocked");
+    if (!a) return;
+    a.pane ? run("pane.focus", { pane: a.pane }) : run("terminal.peek", { terminal: a.address });
+  }
+
+  cyclePane(step) {
+    const tab = focused()?.tab;
+    const mine = panes().filter((p) => p.tab === tab);
+    if (mine.length < 2) return;
+    const i = mine.findIndex((p) => p.focused);
+    run("pane.focus", { pane: mine[(i + step + mine.length) % mine.length].pane });
+  }
+
+  // One entry per direct child of the tree, in order, so its index is the child index.
+  item(id, act, fold) {
+    this.nav.push({ id, act, fold, space: this.space });
+    return id;
+  }
+
+  mark(el, id, t) {
+    const on = id === this.cur && this.handle.is_focused();
+    return el.border(1).border_color(on ? t.accent : "#00000000");
+  }
+
+  reveal() {
+    const i = this.nav.findIndex((n) => n.id === this.cur);
+    if (i >= 0) this.scroll.scroll_to_item(i);
+  }
+
+  key(e, cx) {
+    const k = e.keystroke;
+    let i = this.nav.findIndex((n) => n.id === this.cur);
+    const n = this.nav[i];
+    const go = (j) => { const c = this.nav[Math.max(0, Math.min(this.nav.length - 1, j))]; if (c) this.cur = c.id; };
+    if (k === "j" || k === "down") go(i + 1);
+    else if (k === "k" || k === "up") go(i - 1);
+    else if (k === "g" || k === "home") go(0);
+    else if (k === "shift-g" || k === "end") go(this.nav.length - 1);
+    else if (k === "enter" || k === "space") { n?.act(); return; }
+    else if (k === "l" || k === "right") { if (n?.fold && this.folded.has(n.space)) this.toggle(n.space, cx); else go(i + 1); }
+    else if (k === "h" || k === "left") {
+      if (n?.fold && !this.folded.has(n.space)) this.toggle(n.space, cx);
+      else if (n?.space && !n.fold) this.cur = `space-${n.space}`;
+    }
+    else if (k === "?" || k === "shift-?" || k === "shift-/") { run("mod.open", { name: "nav-keys" }); return; }
+    else if (k === "escape") { run("pane.go", { direction: "right" }); return; }
+    else return;
+    cx.stop_propagation();
+    this.reveal();
+    cx.notify();
   }
 
   toggle(id, cx) {
@@ -78,8 +156,9 @@ export default class SpaceTree extends View {
 
   spaceRow(s, t, fill, mine, cx) {
     const open = !this.folded.has(s.id);
-    return h_flex()
-      .id(`space-${s.id}`)
+    const id = this.item(`space-${s.id}`, () => run("space.select", { id: s.id }), mine.length > 0);
+    return this.mark(h_flex(), id, t)
+      .id(id)
       .px(8)
       .h(30)
       .flex_none()
@@ -111,8 +190,10 @@ export default class SpaceTree extends View {
   subRow(s, t, depth = 1) {
     const k = s.t;
     const pic = icon(k.program, 13, t.foreground);
-    return h_flex()
-      .id(`sub-${k.address}`)
+    const open = () => (this.listed.has(k.address) ? run("pane.focus", { terminal: k.address }) : run("terminal.peek", { terminal: k.address }));
+    const id = this.item(`sub-${k.address}`, open);
+    return this.mark(h_flex(), id, t)
+      .id(id)
       .pl(22 + depth * 16)
       .pr(8)
       .h(26)
@@ -121,7 +202,7 @@ export default class SpaceTree extends View {
       .rounded(8)
       .text_size(12)
       .hover((st) => st.bg(t.hover))
-      .on_click(() => (this.listed.has(k.address) ? run("pane.focus", { terminal: k.address }) : run("terminal.peek", { terminal: k.address })))
+      .on_click(open)
       .children(s.lines.map((l) => div().self_start().mt(-4).w(9).h(17).mr(4).flex_none()
         .when(Boolean(l), (el) => el.border_l(1.5).border_color(t.input))
         .when(l === "└" || l === "├", (el) => el.border_b(1.5).rounded_bl(6))))
@@ -141,7 +222,8 @@ export default class SpaceTree extends View {
   }
 
   row(id, depth, t, { on, pic, label, st, dim, click, right, dbl }) {
-    return h_flex().id(id).pl(14 + depth * 16).pr(8).h(28).flex_none().gap(8).items_center().rounded(8).text_size(12.5)
+    this.item(id, click);
+    return this.mark(h_flex(), id, t).id(id).pl(14 + depth * 16).pr(8).h(28).flex_none().gap(8).items_center().rounded(8).text_size(12.5)
       .when(on, (el) => el.bg(t.raised))
       .hover((s) => s.bg(t.hover))
       .on_mouse_down("left", (e, cx) => { cx.stop_propagation(); if (dbl && e.click_count === 2) dbl(); })
@@ -181,8 +263,9 @@ export default class SpaceTree extends View {
   }
 
   compact(s, i, t) {
-    return h_flex().flex_none().justify_center().child(h_flex()
-      .id(`space-${s.id}`)
+    const id = this.item(`space-${s.id}`, () => run("space.select", { id: s.id }));
+    return h_flex().flex_none().justify_center().child(this.mark(h_flex(), id, t)
+      .id(id)
       .relative()
       .w(32)
       .h(26)
@@ -209,9 +292,12 @@ export default class SpaceTree extends View {
     const top = list.filter((a) => !nested.has(a.address));
 
     const order = [];
+    this.nav = [];
+    this.space = null;
     const rows = collapsed
       ? sp.map((s, i) => this.compact(s, i, t))
       : sp.flatMap((s) => {
+          this.space = s.id;
           const fill = MARK[colors[s.id] ?? "ansi6"] ?? t[colors[s.id]] ?? colors[s.id];
           const head = this.spaceRow(s, t, fill, s.tabs, cx);
           if (this.folded.has(s.id)) return [head];
@@ -221,11 +307,16 @@ export default class SpaceTree extends View {
               click: () => openOverlay({ mod: "new-menu", kind: "popup", width: 250, height: 512 }),
             })] : [])];
         });
+    this.space = null;
+    const newSpace = this.item("space-new", () => run("space.new"));
+    if (this.cur && !this.nav.some((n) => n.id === this.cur)) this.cur = this.nav[0]?.id ?? null;
+    this.agentOrder = [...order, ...top.filter((a) => !order.includes(a.address)).map((a) => a.address)];
     setAgentOrder([...order, ...top.filter((a) => !order.includes(a.address)).map((a) => a.address)]);
 
-    return v_flex().size_full().min_h(0).bg(t.chrome).text_size(13)
-      .child(v_flex().id("tree").flex_1().min_h(0).px(collapsed ? 0 : 8).pt(10).pb(14).gap(1).overflow_y_scrollbar().mode("always").children(rows)
-        .child(h_flex().id("space-new").on_mouse_down("left", (_e, cx) => cx.stop_propagation()).h(28).mt(4).px(collapsed ? 0 : 8).gap(9).items_center().rounded(8).text_color(t.dim)
+    return v_flex().id("space-tree").size_full().min_h(0).bg(t.chrome).text_size(13)
+      .track_focus(this.handle).on_key_down((e, cx) => this.key(e, cx))
+      .child(v_flex().id("tree").track_scroll(this.scroll).flex_1().min_h(0).px(collapsed ? 0 : 8).pt(10).pb(14).gap(1).overflow_y_scrollbar().mode("always").children(rows)
+        .child(this.mark(h_flex(), newSpace, t).id(newSpace).on_mouse_down("left", (_e, cx) => cx.stop_propagation()).h(28).mt(4).px(collapsed ? 0 : 8).gap(9).items_center().rounded(8).text_color(t.dim)
           .when(collapsed, (el) => el.w(32).justify_center())
           .hover((st) => st.bg(t.hover).text_color(t.foreground))
           .on_click(() => run("space.new"))
