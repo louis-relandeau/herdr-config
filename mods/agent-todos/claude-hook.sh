@@ -7,6 +7,10 @@ if [ "$1" = remind ]; then
   echo "Herdr todo panel: if this message brings work, update your list with \`$T\` (set/add/start/done/ls) before and while doing it."
   exit 0
 fi
+# New conversation (startup, /clear): drop the previous session's todos.
+case "$(jq -r '.source // empty' 2>/dev/null)" in
+  startup|clear) "$T" clear >/dev/null 2>&1 ;;
+esac
 cat <<MSG
 You are running in a Herdr terminal ($HC_TERMINAL_ID). The user watches a side panel showing your todo list, and relies on it to follow what you're doing. Keep it current with the shell command \`$T\` (output prints the numbered list):
 - \`$T set\` replaces the list from stdin lines; \`$T add "text" ...\` appends

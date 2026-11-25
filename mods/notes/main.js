@@ -1,5 +1,5 @@
 import { View, div } from "gpui-kit";
-import { v_flex, h_flex, Textarea, TextareaState, InputState, Input } from "gpui-base";
+import { v_flex, h_flex, Textarea, TextareaState, InputState, Input, ScrollHandle } from "gpui-base";
 import { home, theme, settings, layout, focused, run, nextCommand, readTextFile, writeTextFile } from "herdr";
 
 const MONTHS = ["Jan.", "Feb.", "Mar.", "Apr.", "May", "June", "July", "Aug.", "Sep.", "Oct.", "Nov.", "Dec."];
@@ -92,11 +92,26 @@ class Todos extends Doc {
   compose(value) { const body = value.replace(/\s+$/, ""); return body ? body + (this.tail || "\n") : ""; }
 }
 
+const BIG = 100000;
+// Today's section in `state`, earlier days in `hist`; both editable, saved as one file.
 class Log extends Doc {
-  decompose(text) { const [head, day] = split(text); this.head = head; return day; }
+  constructor(...a) {
+    super(...a);
+    this.state.set_auto_grow(1, BIG);
+    this.hist = TextareaState.new({ value: "" });
+    this.hist.set_soft_wrap(true);
+    this.hist.set_auto_grow(1, BIG);
+    this.hist.on("change", (_e, cx) => this.changed(cx));
+  }
+  decompose(text) {
+    const [head, day] = split(text);
+    this.applying = true; this.hist.set_value(head.replace(/\s+$/, "")); this.applying = false;
+    return day;
+  }
   compose(value) {
-    if (!value.trim()) return this.head;
-    return this.head.replace(/\n*$/, "\n\n") + value.replace(/^\n+/, "");
+    const head = this.hist.value().replace(/\s+$/, "");
+    if (!value.trim()) return head ? head + "\n" : "";
+    return (head ? head + "\n\n" : "") + value.replace(/^\n+/, "");
   }
   open() { const l = this.text().split("\n").reverse().find(l => OPEN.test(l) || RANGE.test(l)); return l && OPEN.test(l) ? l.match(OPEN) : null; }
   total() {
@@ -116,6 +131,7 @@ export default class Notes extends View {
     try { this.tab = localStorage.getItem("tab") || "todos"; } catch {}
     this.todos = new Todos(`${dir}/todos.txt`, cx);
     this.log = new Log(`${dir}/work-times.txt`, cx);
+    this.scroll = ScrollHandle.new();
     this.task = InputState.new({ placeholder: "Add task, Enter…" });
     this.task.on("submit", (e, cx) => e.secondary ? this.startStop(cx) : this.addTask(cx));
     this.reload(cx);
@@ -129,6 +145,7 @@ export default class Notes extends View {
         if (c === "todos" || c === "log") this.tab = c;
         else if (c === "switch") this.tab = this.tab === "todos" ? "log" : "todos";
         else if (c === "leave") { this.leave(); continue; }
+        if (this.tab === "log") this.toToday();
         this.focus();
         try { localStorage.setItem("tab", this.tab); } catch {}
         cx.notify();
@@ -164,13 +181,57 @@ export default class Notes extends View {
 
   reload(cx) {
     if (this.day !== today()) { this.day = today(); this.log.disk = null; }
-    cx.spawn(async cx => { await this.todos.load(cx); await this.log.load(cx); });
+    cx.spawn(async cx => {
+      await this.todos.load(cx);
+      const before = this.log.disk;
+      await this.log.load(cx);
+      if (this.log.disk !== before) this.toToday();
+    });
   }
 
   started(v) {
     const body = v.replace(/\s+$/, "");
-    return (body ? body + "\n\n" : `${today()}\n\n`) + `${now()}-\n`;
+    const head = split(v)[1] ? "" : `${today()}\n\n`;
+    return (body ? body + "\n\n" : "") + head + `${now()}-\n`;
   }
+
+  // Today's section at the top of the view; history sits above it.
+  toToday() { this.scroll.scroll_to_item(1); }
+
+  caret(state, at) { try { state.set_selected_range({ start: at, end: at }); } catch {} state.focus(); }
+
+  // Up on today's first line moves into history; down on history's last line comes back.
+  logKeys(e, cx) {
+    if (e.modifiers.control || e.modifiers.alt || e.modifiers.shift || e.modifiers.platform) return;
+    const today = this.log.state, hist = this.log.hist;
+    if (e.key === "up" && today.selected_range().start <= Math.max(0, this.log.text().indexOf("\n")) && hist.value()) {
+      if (today.selected_range().start !== today.selected_range().end) return;
+      cx.stop_propagation();
+      this.caret(hist, utf8(hist.value()));
+      this.scroll.scroll_to_item(0);
+    } else if (e.key === "down") {
+      const v = hist.value(), r = hist.selected_range();
+      if (r.start !== r.end || r.start < utf8(v.slice(0, v.lastIndexOf("\n") + 1))) return;
+      cx.stop_propagation();
+      this.caret(today, 0);
+      this.toToday();
+    }
+  }
+
+  logBody(t, font) {
+    const hist = this.log.hist.value();
+    const area = state => Textarea.new(state).w_full().p(6).font_family(font).text_size(13).bg("#00000000");
+    return div().id("notes-log").flex_1().min_h(0).p(6)
+      .on_size_change((size, cx) => { this.viewH = size.height - 12; this.toToday(); cx.notify(); })
+      .child(v_flex().id("notes-log-scroll").size_full().overflow_y_scrollbar().track_scroll(this.scroll)
+        .on_key_down((e, cx) => this.logKeys(e, cx))
+        .child(div().when(!!hist, d => d.border_b(1).border_color(t.border).opacity(0.75)).child(hist ? area(this.log.hist) : div()))
+        .child(v_flex().min_h(this.viewH ?? 0)
+          .child(area(this.log.state))
+          .child(div().id("notes-today-rest").flex_1().min_h(0).cursor_text().on_click(() => this.focusToday()))));
+  }
+
+  focusToday() { this.caret(this.log.state, utf8(this.log.text().replace(/\s+$/, ""))); }
 
   start(cx) { this.log.edit(cx, v => this.started(v)); }
 
@@ -196,7 +257,7 @@ export default class Notes extends View {
     this.task.set_value("");
   }
 
-  select(tab, cx) { this.tab = tab; try { localStorage.setItem("tab", tab); } catch {} cx.notify(); }
+  select(tab, cx) { this.tab = tab; if (tab === "log") this.toToday(); try { localStorage.setItem("tab", tab); } catch {} cx.notify(); }
 
   tabButton(id, label, t) {
     const on = this.tab === id;
@@ -228,6 +289,7 @@ export default class Notes extends View {
   render(cx) {
     this.watchShown(cx);
     const t = theme(), doc = this.tab === "log" ? this.log : this.todos, glass = paneGlass(t);
+    const font = settings().font_family ?? "JetBrains Mono";
     return v_flex().id("notes").size_full().min_h(0).rounded(10).overflow_hidden().bg(glass)
       .border_1().border_color(t.border).text_color(t.foreground).text_size(13)
       .child(h_flex().h(42).flex_none().px(10).gap(4).items_center().border_b(1).border_color(t.border)
@@ -236,6 +298,7 @@ export default class Notes extends View {
         .child(div().flex_1().min_w(0).truncate().text_right().text_size(11).text_color(t.dim)
           .child(doc.error ?? (doc.ver !== doc.saved ? "Saving…" : doc.path.split("/").pop()))))
       .when(this.tab === "log", el => el.child(this.logBar(t)))
-      .child(div().flex_1().min_h(0).p(6).child(Textarea.new(doc.state).size_full().p(6).font_family(settings().font_family ?? "JetBrains Mono").text_size(13).bg("#00000000")));
+      .child(this.tab === "log" ? this.logBody(t, font)
+        : div().flex_1().min_h(0).p(6).child(Textarea.new(doc.state).size_full().p(6).font_family(font).text_size(13).bg("#00000000")));
   }
 }
