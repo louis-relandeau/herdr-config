@@ -23,7 +23,7 @@ const NAV = [
   [/^tab\.prev$/, "Previous tab"],
   [/^agent\.next$/, "Next agent"],
   [/^agent\.prev$/, "Previous agent"],
-  [/^space-tree\.agent-done$/, "Next done / needs-you agent"],
+  [/^space-tree\.agent-done$/, "Next done / needs-you, else working agent"],
   [/^space-tree\.pane-next$/, "Next pane"],
   [/^space-tree\.pane-prev$/, "Previous pane"],
   [/^pane\.go:left$/, "Pane left (into the tree)"],

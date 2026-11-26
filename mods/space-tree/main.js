@@ -55,14 +55,15 @@ export default class SpaceTree extends View {
     });
   }
 
-  // The next "done" or "blocked" (needs you) agent after the focused one, in the tree's order, wrapping around.
+  // The next "done" or "blocked" (needs you) agent after the focused one, in the tree's order, wrapping around;
+  // with none, the next working one.
   nextDone() {
     const all = agents();
     const by = new Map(all.map((a) => [a.address, a]));
     const list = (this.agentOrder ?? all.map((a) => a.address)).map((x) => by.get(x)).filter(Boolean);
     const i = list.findIndex((a) => a.focused);
     const rest = [...list.slice(i + 1), ...list.slice(0, i + 1)];
-    const a = rest.find((a) => a.status === "done" || a.status === "blocked");
+    const a = rest.find((a) => a.status === "done" || a.status === "blocked") ?? rest.find((a) => a.status === "working");
     if (!a) return;
     a.pane ? run("pane.focus", { pane: a.pane }) : run("terminal.peek", { terminal: a.address });
   }
