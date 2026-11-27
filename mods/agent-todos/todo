@@ -1,21 +1,47 @@
 #!/bin/sh
-# Agent todo list, kept on the herdr terminal as label herdr.todos (JSON: [{t, s}]).
+# Agent todo list, kept on the herdr terminal as label herdr.todos (JSON: [{t, s, c?: [{t, s}]}]).
+# Items are addressed as N (top level) or N.M (sub-item of N).
 set -e
 T=${HC_TERMINAL_ID:?not in a herdr terminal}
+LIB='
+def at($n): ($n | tostring | split(".") | map(tonumber - 1)) as $a
+  | (if ($a | length) == 1 then [$a[0]] else [$a[0], "c", $a[1]] end) as $p
+  | if any($a[]; . < 0) or getpath($p) == null then error("no item \($n)") else $p end;
+def clear_doing: map(if .s == "doing" then .s = "todo" else . end);
+# A parent follows its sub-items: all done -> done, one in progress -> in progress.
+def fix: map(if ((.c // []) | length) > 0 then
+    if all(.c[]; .s == "done") then .s = "done"
+    elif any(.c[]; .s == "doing") then .s = "doing"
+    elif .s == "done" then .s = "todo"
+    else . end
+  else . end);
+def mark($n; $s): at($n) as $p | setpath($p + ["s"]; $s)
+  | if ($p | length) == 1 and $s != "doing" and getpath($p + ["c"]) != null
+    then setpath($p + ["c"]; getpath($p + ["c"]) | map(.s = $s)) else . end;
+def item($t): {t: $t, s: "todo"};
+'
 get() { hc get "$T" --json | jq -c '.labels["herdr.todos"] // "[]" | fromjson? // []'; }
 put() { hc label "$T" "herdr.todos=$1" >/dev/null; }
-mark() { cur=$(get); for n in "$@"; do cur=$(printf %s "$cur" | jq -c --argjson i "$n" --arg s "$S" '.[$i-1].s = $s'); done; put "$cur"; }
+j() { f=$1; shift; v=$(get | jq -c "$LIB $f" "$@"); put "$v"; }
 cmd=${1:-ls}; [ $# -gt 0 ] && shift
 case "$cmd" in
-  add) cur=$(get); for t in "$@"; do cur=$(printf %s "$cur" | jq -c --arg t "$t" '. + [{t: $t, s: "todo"}]'); done; put "$cur" ;;
-  set) put "$(jq -Rnc '[inputs | select(length > 0) | {t: ., s: "todo"}]')" ;;
-  start) cur=$(get | jq -c 'map(if .s == "doing" then .s = "todo" else . end)'); put "$cur"; S=doing mark "$@" ;;
-  done) S=done mark "$@" ;;
-  undo) S=todo mark "$@" ;;
-  edit) put "$(get | jq -c --argjson i "$1" --arg t "$2" '.[$i-1].t = $t')" ;;
-  rm) cur=$(get); for n in $(printf '%s\n' "$@" | sort -rn); do cur=$(printf %s "$cur" | jq -c --argjson i "$n" 'del(.[$i-1])'); done; put "$cur" ;;
+  add) j '. + ($ARGS.positional | map(item(.)))' --args "$@" ;;
+  sub) n=$1; shift; j 'at($n)[0] as $i | .[$i].c += ($ARGS.positional | map(item(.))) | fix' --arg n "$n" --args "$@" ;;
+  set) v=$(jq -Rnc "$LIB"'
+    reduce (inputs | select(test("\\S"))) as $l ([];
+      if ($l | test("^\\s")) and length > 0 then .[-1].c += [item($l | sub("^\\s+(- )?"; ""))]
+      else . + [item($l | sub("^\\s*(- )?"; ""))] end)'); put "$v" ;;
+  start) j 'clear_doing | map(if .c then .c |= clear_doing else . end) | mark($n; "doing") | fix' --arg n "$1" ;;
+  done) j 'reduce $ARGS.positional[] as $n (.; mark($n; "done")) | fix' --args "$@" ;;
+  undo) j 'reduce $ARGS.positional[] as $n (.; mark($n; "todo")) | fix' --args "$@" ;;
+  edit) j 'setpath(at($n) + ["t"]; $t)' --arg n "$1" --arg t "$2" ;;
+  rm) j 'delpaths([$ARGS.positional[] as $n | at($n)]) | fix' --args "$@" ;;
   clear) put "[]" ;;
   ls) ;;
-  *) echo "usage: todo add <text>... | set (lines on stdin) | start <n> | done <n>... | undo <n>... | edit <n> <text> | rm <n>... | clear | ls" >&2; exit 2 ;;
+  *) echo "usage: todo add <text>... | sub <n> <text>... | set (lines on stdin; indented lines are sub-items) | start <n> | done <n>... | undo <n>... | edit <n> <text> | rm <n>... | clear | ls   (n = N or N.M)" >&2; exit 2 ;;
 esac
-get | jq -r 'to_entries[] | "\(.key + 1). [\({todo: " ", doing: ">", done: "x"}[.value.s])] \(.value.t)"'
+get | jq -r '
+  def m: {todo: " ", doing: ">", done: "x"}[.];
+  to_entries[] | (.key + 1 | tostring) as $i
+  | "\($i). [\(.value.s | m)] \(.value.t)",
+    (.value.c // [] | to_entries[] | "    \($i).\(.key + 1) [\(.value.s | m)] \(.value.t)")'

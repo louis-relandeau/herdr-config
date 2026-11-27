@@ -1,4 +1,5 @@
 // Each agent's own todo list, read from its terminal label herdr.todos (written by ./todo).
+// Items may carry one level of sub-items (c); a finished parent collapses them.
 
 import { View, div, image, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
@@ -29,10 +30,24 @@ function findHidden(node, id, up = false) {
 function parse(raw) {
   try {
     const v = JSON.parse(raw ?? "[]");
-    return Array.isArray(v) ? v.filter((i) => i && typeof i.t === "string") : [];
+    const ok = (i) => i && typeof i.t === "string";
+    return Array.isArray(v)
+      ? v.filter(ok).map((i) => (Array.isArray(i.c) ? { ...i, c: i.c.filter(ok) } : i))
+      : [];
   } catch {
     return [];
   }
+}
+
+// Same rule as ./todo: a parent with sub-items is done when they all are, in progress when one is.
+function fix(list) {
+  return list.map((it) => {
+    if (!it.c?.length) return it;
+    const s = it.c.every((c) => c.s === "done") ? "done"
+      : it.c.some((c) => c.s === "doing") ? "doing"
+      : it.s === "done" ? "todo" : it.s;
+    return { ...it, s };
+  });
 }
 
 function icon(p, size, color) {
@@ -48,18 +63,26 @@ function agentPanes() {
 export default class AgentTodos extends View {
   init(_props, cx) {
     this.hideDone = new Set();
+    // Parents the user opened or closed by hand, overriding the done = collapsed default.
+    this.flipped = new Set();
     // A hidden copy isn't re-rendered, so the show/hide check runs on a timer too.
     cx.timer.every(400, () => this.syncShown(agentPanes().length > 0));
   }
 
   // The user can tick items too; the agent sees it next time it lists.
-  toggle(address, list, i) {
-    const next = list.map((it, j) => (j === i ? { ...it, s: it.s === "done" ? "todo" : "done" } : it));
+  toggle(address, list, i, k) {
+    const flip = (s) => (s === "done" ? "todo" : "done");
+    const next = fix(list.map((it, j) => {
+      if (j !== i) return it;
+      if (k !== undefined) return { ...it, c: it.c.map((c, m) => (m === k ? { ...c, s: flip(c.s) } : c)) };
+      const s = flip(it.s);
+      return { ...it, s, ...(it.c ? { c: it.c.map((c) => ({ ...c, s })) } : {}) };
+    }));
     const [machine, id] = address.includes("/") ? address.split("/") : [null, address];
     exec("hc", ["label", id, `${LABEL}=${JSON.stringify(next)}`], { on: machine }).catch(() => {});
   }
 
-  item(t, address, list, it, i) {
+  item(t, address, list, it, i, k, fold) {
     const done = it.s === "done";
     const doing = it.s === "doing";
     const mark = done
@@ -70,16 +93,17 @@ export default class AgentTodos extends View {
             .child(div().size(6).rounded(3).bg(t.working).loop("opacity", { from: 0.3, to: 1, period: 1200 }))
         : div().size(14).flex_none().rounded(7).border(1).border_color(t.input);
     return h_flex()
-      .id(`it-${address}-${i}`)
+      .id(`it-${address}-${i}${k === undefined ? "" : `-${k}`}`)
       .items_start()
       .gap(8)
-      .px(10)
+      .pl(k === undefined ? 10 : 32)
+      .pr(10)
       .py(4)
       .rounded(6)
       .when(doing, (el) => el.bg(DEEP))
       .hover((s) => s.bg(doing ? DEEP : HOVER))
       .cursor_pointer()
-      .on_click(() => this.toggle(address, list, i))
+      .on_click(() => this.toggle(address, list, i, k))
       .child(div().pt(2).child(mark))
       .child(
         div().flex_1().min_w(0).whitespace_normal().text_size(13)
@@ -87,7 +111,30 @@ export default class AgentTodos extends View {
           .when(done, (el) => el.line_through())
           .when(doing, (el) => el.font_semibold())
           .child(it.t),
-      );
+      )
+      .when(!!fold, (el) => el.child(fold));
+  }
+
+  // Count and chevron on a parent; clicking it opens or closes the sub-items.
+  fold(t, key, it, open) {
+    const n = it.c.filter((c) => c.s === "done").length;
+    return h_flex()
+      .id(`fold-${key}`)
+      .flex_none()
+      .items_center()
+      .gap(4)
+      .pt(1)
+      .text_size(11)
+      .text_color(t.dim)
+      .cursor_pointer()
+      .hover((s) => s.text_color(t.foreground))
+      .on_click((_e, cx) => {
+        cx.stop_propagation();
+        this.flipped.has(key) ? this.flipped.delete(key) : this.flipped.add(key);
+        cx.notify();
+      })
+      .child(`${n}/${it.c.length}`)
+      .child(svg(`mods/workspace-chrome/chevron-${open ? "down" : "right"}.svg`).size(11).flex_none().text_color(t.dim));
   }
 
   // One section per agent pane: equal share of the panel height, its own scroll.
@@ -97,7 +144,17 @@ export default class AgentTodos extends View {
     const total = list.length;
     const n = list.filter((i) => i.s === "done").length;
     const hide = this.hideDone.has(a);
-    const shown = list.map((it, i) => [it, i]).filter(([it]) => !(hide && it.s === "done"));
+    const rows = [];
+    list.forEach((it, i) => {
+      if (hide && it.s === "done") return;
+      if (!it.c?.length) return rows.push(this.item(t, a, list, it, i));
+      const key = `${a}:${i}`;
+      const open = (it.s !== "done") !== this.flipped.has(key);
+      rows.push(this.item(t, a, list, it, i, undefined, this.fold(t, key, it, open)));
+      if (open) it.c.forEach((c, k) => {
+        if (!(hide && c.s === "done")) rows.push(this.item(t, a, list, c, i, k));
+      });
+    });
 
     const head = h_flex()
       .id(`head-${a}`)
@@ -122,7 +179,7 @@ export default class AgentTodos extends View {
         .child(hide ? "show done" : "hide done")));
 
     const body = total
-      ? v_flex().py(4).children(shown.map(([it, i]) => this.item(t, a, list, it, i)))
+      ? v_flex().py(4).children(rows)
       : div().p(12).text_size(12).text_color(t.dim).whitespace_normal().child("No todos yet.");
 
     return v_flex()
